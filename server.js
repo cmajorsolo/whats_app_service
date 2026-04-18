@@ -4,14 +4,15 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const app = express();
 
+const PORT = process.env.PORT;  // Railway sets this — don't default it
+
 const {
   VERIFY_TOKEN,
   WHATSAPP_TOKEN,
   APP_SECRET,
   PHONE_NUMBER_ID,
   ANTHROPIC_API_KEY,
-  LAPTOP_WEBHOOK_URL,
-  PORT = 3000
+  LAPTOP_WEBHOOK_URL  
 } = process.env;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
