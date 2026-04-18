@@ -52,6 +52,8 @@ Once you have enough information, output EXACTLY this JSON block and nothing els
 }
 </READY>`;
 
+app.get('/', (req, res) => res.send('OK'));
+
 // ── Verification handshake ────────────────────────────────────────────────────
 app.get('/webhook', (req, res) => {
   const mode      = req.query['hub.mode'];
@@ -167,5 +169,14 @@ async function sendWhatsAppMessage(to, body) {
     }),
   });
 }
+
+// Add these before app.listen(...)
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION:', err);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('UNHANDLED REJECTION:', err);
+});
 
 app.listen(PORT, () => console.log(`Listening on port ${PORT}`));
