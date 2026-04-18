@@ -1,5 +1,3 @@
-// server.js  — full file, replace your existing one
-
 import express from 'express';
 import crypto from 'crypto';
 import Anthropic from '@anthropic-ai/sdk';
@@ -12,16 +10,13 @@ const {
   APP_SECRET,
   PHONE_NUMBER_ID,
   ANTHROPIC_API_KEY,
-  LAPTOP_WEBHOOK_URL,   // e.g. your ngrok URL: https://xxxx.ngrok.io/job
+  LAPTOP_WEBHOOK_URL,
   PORT = 3000
 } = process.env;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-
-// ── Conversation history store (phone number → messages array) ────────────────
 const conversations = new Map();
 
-// ── System prompt — the personality and rules for the bot ─────────────────────
 const SYSTEM_PROMPT = `You are a friendly AI video creator assistant on WhatsApp.
 Your only job is to help users create short pitch/advertising videos for their products.
 
@@ -52,6 +47,7 @@ Once you have enough information, output EXACTLY this JSON block and nothing els
 }
 </READY>`;
 
+// ── Health check ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send('OK'));
 
 // ── Verification handshake ────────────────────────────────────────────────────
@@ -60,49 +56,52 @@ app.get('/webhook', (req, res) => {
   const token     = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('Webhook verified');
     res.status(200).send(challenge);
   } else {
     res.sendStatus(403);
   }
 });
 
-// ── Signature verification ────────────────────────────────────────────────────
-function verifySignature(req, res, buf) {
-  const sig = req.headers['x-hub-signature-256'];
-  if (!sig) return;
-  const expected = 'sha256=' + crypto
-    .createHmac('sha256', APP_SECRET)
-    .update(buf)
-    .digest('hex');
-  if (sig !== expected) res.sendStatus(401);
-}
-app.use(express.json({ verify: verifySignature }));
+// ── Raw body capture for signature verification ───────────────────────────────
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; }
+}));
 
 // ── Incoming message handler ──────────────────────────────────────────────────
-app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // always respond immediately
+app.post('/webhook', (req, res) => {
+  // Verify signature
+  const sig = req.headers['x-hub-signature-256'];
+  if (sig && APP_SECRET) {
+    const expected = 'sha256=' + crypto
+      .createHmac('sha256', APP_SECRET)
+      .update(req.rawBody)
+      .digest('hex');
+    if (sig !== expected) {
+      console.warn('Invalid signature');
+      return res.sendStatus(401);
+    }
+  }
+
+  // Always respond 200 immediately
+  res.sendStatus(200);
 
   const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
   if (!message || message.type !== 'text') return;
 
   const from = message.from;
   const text = message.text.body;
+  console.log(`Message from ${from}: ${text}`);
 
-  handleMessage(from, text).catch(console.error);
+  handleMessage(from, text).catch(err => console.error('handleMessage error:', err));
 });
 
 // ── Conversation manager ──────────────────────────────────────────────────────
 async function handleMessage(from, userText) {
-  // 1. Load or create history for this user
-  if (!conversations.has(from)) {
-    conversations.set(from, []);
-  }
+  if (!conversations.has(from)) conversations.set(from, []);
   const history = conversations.get(from);
-
-  // 2. Append the new user message
   history.push({ role: 'user', content: userText });
 
-  // 3. Call Claude with full history
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-5',
     max_tokens: 1024,
@@ -111,41 +110,26 @@ async function handleMessage(from, userText) {
   });
 
   const assistantText = response.content[0].text;
-
-  // 4. Save assistant reply to history
   history.push({ role: 'assistant', content: assistantText });
 
-  // 5. Check if Claude has enough info and produced a job payload
   const readyMatch = assistantText.match(/<READY>([\s\S]*?)<\/READY>/);
-
   if (readyMatch) {
-    // Claude has all the info — dispatch job to laptop and notify user
     const jobPayload = JSON.parse(readyMatch[1].trim());
-
-    await sendWhatsAppMessage(from, 
-      "Great! I have everything I need. Starting to create your video now — I'll send it to you when it's ready!"
-    );
-
+    await sendWhatsAppMessage(from, "Great! I have everything I need. Starting to create your video now — I'll send it to you when it's ready!");
     await dispatchJobToLaptop({ ...jobPayload, requester: from });
-
-    // Clear conversation so user can request another video
     conversations.delete(from);
-
   } else {
-    // Still gathering info — send Claude's reply back to the user
     await sendWhatsAppMessage(from, assistantText);
   }
 }
 
-// ── Dispatch job to your laptop ───────────────────────────────────────────────
+// ── Dispatch job to laptop ────────────────────────────────────────────────────
 async function dispatchJobToLaptop(job) {
   console.log('Dispatching job:', JSON.stringify(job, null, 2));
-
   if (!LAPTOP_WEBHOOK_URL) {
-    console.warn('LAPTOP_WEBHOOK_URL not set — job logged but not dispatched');
+    console.warn('LAPTOP_WEBHOOK_URL not set — job logged only');
     return;
   }
-
   await fetch(LAPTOP_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -155,7 +139,7 @@ async function dispatchJobToLaptop(job) {
 
 // ── Send WhatsApp message ─────────────────────────────────────────────────────
 async function sendWhatsAppMessage(to, body) {
-  await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
+  const res = await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
@@ -168,15 +152,11 @@ async function sendWhatsAppMessage(to, body) {
       text: { body },
     }),
   });
+  if (!res.ok) console.error('WhatsApp send error:', await res.text());
 }
 
-// Add these before app.listen(...)
-process.on('uncaughtException', (err) => {
-  console.error('UNCAUGHT EXCEPTION:', err);
-});
-
-process.on('unhandledRejection', (err) => {
-  console.error('UNHANDLED REJECTION:', err);
-});
+// ── Error handlers ────────────────────────────────────────────────────────────
+process.on('uncaughtException', err => console.error('UNCAUGHT:', err));
+process.on('unhandledRejection', err => console.error('UNHANDLED:', err));
 
 app.listen(PORT, () => console.log(`Listening on port ${PORT}`));
